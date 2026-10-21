@@ -1,6 +1,6 @@
 import secrets
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
@@ -9,12 +9,32 @@ from app.schemas.auth import (
     SignupRequest, VerifyCodeRequest, LoginRequest, GoogleLoginRequest,
     SetPasswordRequest, ForgotPasswordRequest, ResetPasswordRequest, TokenResponse,
 )
-from app.services.security import hash_password, verify_password, create_access_token, verify_google_token, generate_verification_code
+from app.services.security import hash_password, verify_password, create_access_token, create_guest_access_token, GUEST_ACCESS_TTL_HOURS, verify_google_token, generate_verification_code
+from app.config import JWT_EXPIRE_MINUTES
 from app.services.cleanup import cleanup_stale_guests
 from app.services.email import send_welcome_email, send_verification_email, send_password_reset_email, send_google_only_reset_notice
 from app.api.deps import get_current_user
+from app.services.rate_limit import enforce_rate_limit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+def _issue_browser_access_token(response: Response, request: Request, user_id: str) -> TokenResponse:
+    token = create_access_token(user_id)
+    secure = request.url.scheme == "https"
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        max_age=JWT_EXPIRE_MINUTES * 60,
+        httponly=True,
+        secure=secure,
+        samesite="strict",
+        path="/",
+    )
+    response.delete_cookie("guest_access", path="/", httponly=True, samesite="strict", secure=secure)
+    # Keep the response token for existing non-browser API clients. The web
+    # frontend intentionally discards it and relies on the HttpOnly cookie.
+    return TokenResponse(access_token=token)
 
 MAX_VERIFICATION_ATTEMPTS = 5
 MAX_LOGIN_ATTEMPTS = 5
@@ -23,7 +43,8 @@ MAX_RESET_ATTEMPTS = 5
 
 
 @router.post("/signup")
-def signup(payload: SignupRequest, db: Session = Depends(get_db)):
+def signup(payload: SignupRequest, request: Request, db: Session = Depends(get_db)):
+    enforce_rate_limit(request, db, scope="signup", limit=5, window_seconds=900)
     existing = db.query(models.User).filter(models.User.email == payload.email).first()
     if existing and existing.is_verified:
         raise HTTPException(status_code=400, detail="An account with this email already exists.")
@@ -57,7 +78,8 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/verify-signup", response_model=TokenResponse)
-def verify_signup(payload: VerifyCodeRequest, db: Session = Depends(get_db)):
+def verify_signup(payload: VerifyCodeRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+    enforce_rate_limit(request, db, scope="verify_signup", limit=10, window_seconds=900)
     user = db.query(models.User).filter(models.User.email == payload.email).first()
     if not user or not user.verification_code:
         raise HTTPException(status_code=400, detail="No pending verification for this email.")
@@ -88,11 +110,12 @@ def verify_signup(payload: VerifyCodeRequest, db: Session = Depends(get_db)):
 
     send_welcome_email(user.email)
 
-    return TokenResponse(access_token=create_access_token(str(user.id)))
+    return _issue_browser_access_token(response, request, str(user.id))
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+    enforce_rate_limit(request, db, scope="login", limit=20, window_seconds=900)
     user = db.query(models.User).filter(models.User.email == payload.email).first()
 
     # SECURITY: brute-force protection on password guessing. Checked before
@@ -118,11 +141,12 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     user.lockout_until = None
     db.commit()
 
-    return TokenResponse(access_token=create_access_token(str(user.id)))
+    return _issue_browser_access_token(response, request, str(user.id))
 
 
 @router.post("/google", response_model=TokenResponse)
-def google_login(payload: GoogleLoginRequest, db: Session = Depends(get_db)):
+def google_login(payload: GoogleLoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+    enforce_rate_limit(request, db, scope="google_login", limit=10, window_seconds=900)
     try:
         info = verify_google_token(payload.id_token)
     except Exception as e:
@@ -130,7 +154,7 @@ def google_login(payload: GoogleLoginRequest, db: Session = Depends(get_db)):
         # can raise other exception types too (network/cert issues, its own
         # GoogleAuthError subclasses), which would otherwise surface as an
         # unhandled 500 with internal details instead of a clean 401.
-        print(f"[auth.google_login] Token verification failed: {e}")
+        print(f"[auth.google_login] Token verification failed ({type(e).__name__}).")
         raise HTTPException(status_code=401, detail="Invalid Google token.")
 
     email, google_id = info["email"], info["sub"]
@@ -151,31 +175,35 @@ def google_login(payload: GoogleLoginRequest, db: Session = Depends(get_db)):
     if is_new_user:
         send_welcome_email(user.email)
 
-    return TokenResponse(access_token=create_access_token(str(user.id)))
+    return _issue_browser_access_token(response, request, str(user.id))
 
 
 @router.post("/guest")
-def start_guest_session(db: Session = Depends(get_db)):
-    # SECURITY MODEL (by design, not an oversight): guest chat sessions are
-    # protected ONLY by their UUID being unguessable (128-bit, cryptographically
-    # random) — there is no additional auth check for guest sessions anywhere
-    # in the app (see the `session.user_id is not None` gate in documents.py /
-    # chat.py / chats.py, which only applies to logged-in-owned sessions).
-    # This mirrors the common "anyone with the link" pattern (e.g. Google Docs
-    # link-sharing) and keeps the guest flow frictionless — no account needed.
-    # The tradeoff: if a guest session's UUID ever leaks (shared link, browser
-    # history, a referrer header, server access logs), whoever has it can read
-    # and upload to that session. Guest data is also capped at 50MB and
-    # auto-deleted after 24h of inactivity (see cleanup.py), which bounds the
-    # exposure window and blast radius. If stronger guest-isolation is ever
-    # needed, layer in a second secret (e.g. an HttpOnly session cookie)
-    # rather than relying on the UUID alone.
+def start_guest_session(request: Request, response: Response, db: Session = Depends(get_db)):
+    enforce_rate_limit(request, db, scope="guest_session", limit=10, window_seconds=900)
     cleanup_stale_guests(db)
     session = models.ChatSession(is_guest=True, user_id=None)
     db.add(session)
     db.commit()
     db.refresh(session)
+    response.set_cookie(
+        key="guest_access",
+        value=create_guest_access_token(str(session.id)),
+        max_age=GUEST_ACCESS_TTL_HOURS * 60 * 60,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+        path="/",
+    )
     return {"chat_session_id": str(session.id)}
+
+
+@router.post("/logout")
+def logout(request: Request, response: Response):
+    secure = request.url.scheme == "https"
+    response.delete_cookie("access_token", path="/", httponly=True, samesite="strict", secure=secure)
+    response.delete_cookie("guest_access", path="/", httponly=True, samesite="strict", secure=secure)
+    return {"status": "logged out"}
 
 
 @router.post("/set-password")
@@ -195,7 +223,8 @@ def set_password(
 
 
 @router.post("/forgot-password")
-def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
+def forgot_password(payload: ForgotPasswordRequest, request: Request, db: Session = Depends(get_db)):
+    enforce_rate_limit(request, db, scope="forgot_password", limit=3, window_seconds=3600)
     """
     SECURITY: always returns the same generic response whether or not the
     email is registered (anti-enumeration) — the response never reveals
@@ -230,7 +259,8 @@ def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db
 
 
 @router.post("/reset-password", response_model=TokenResponse)
-def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db)):
+def reset_password(payload: ResetPasswordRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+    enforce_rate_limit(request, db, scope="reset_password", limit=10, window_seconds=900)
     user = db.query(models.User).filter(models.User.email == payload.email).first()
     if not user or not user.reset_code:
         raise HTTPException(status_code=400, detail="Invalid or expired code.")
@@ -252,7 +282,7 @@ def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db))
     user.reset_attempts = 0
     db.commit()
 
-    return TokenResponse(access_token=create_access_token(str(user.id)))
+    return _issue_browser_access_token(response, request, str(user.id))
 
 
 @router.get("/me")

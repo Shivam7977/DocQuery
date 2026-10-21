@@ -93,7 +93,12 @@ def _rows_to_markdown(rows: list[list[str | None]]) -> str:
     return "\n".join(lines)
 
 
-def extract_tables_from_page(page, page_number: int, filename: str) -> list[dict]:
+def extract_tables_from_page(
+    page,
+    page_number: int,
+    filename: str,
+    table_regions: list[dict] | None = None,
+) -> list[dict]:
     """
     Returns a list of table entries for one page, each ready to become its
     own chunk: {"text": <caption + markdown>, "page": ..., "source": ...,
@@ -122,6 +127,12 @@ def extract_tables_from_page(page, page_number: int, filename: str) -> list[dict
             "horizontal_strategy": "lines",
         })
 
+    if table_regions is not None:
+        table_regions.extend(
+            {"page": page_number, "bbox": tuple(table.bbox)}
+            for table in found_tables
+        )
+
     caption_words = [{"text": w["text"], "top": w["top"]} for w in page.extract_words()]
 
     for table in found_tables:
@@ -146,13 +157,19 @@ def extract_tables_from_page(page, page_number: int, filename: str) -> list[dict
     return results
 
 
-def extract_tables_from_pdf(file_path: str, display_name: str | None = None) -> list[dict]:
+def extract_tables_from_pdf(
+    file_path: str,
+    display_name: str | None = None,
+    table_regions: list[dict] | None = None,
+) -> list[dict]:
     filename = display_name or file_path.split("\\")[-1].split("/")[-1]
 
     table_chunks = []
     with pdfplumber.open(file_path) as pdf:
         for page_number, page in enumerate(pdf.pages, start=1):
-            table_chunks.extend(extract_tables_from_page(page, page_number, filename))
+            table_chunks.extend(extract_tables_from_page(
+                page, page_number, filename, table_regions=table_regions
+            ))
 
     return table_chunks
 

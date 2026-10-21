@@ -71,14 +71,16 @@ async function apiPost(path, body) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body || {}),
+    credentials: "include",
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.detail || "Something went wrong.");
   return data;
 }
 
-function goToAppWithToken(token) {
-  localStorage.setItem("docquery_token", token);
+function goToAppWithCookie() {
+  localStorage.setItem("docquery_authenticated", "true");
+  localStorage.removeItem("docquery_token");
   localStorage.removeItem("docquery_chat_session_id");
   localStorage.removeItem("docquery_guest_mode");
   window.location.href = "app.html";
@@ -92,8 +94,8 @@ authForm.addEventListener("submit", async (e) => {
 
   try {
     if (mode === "login") {
-      const data = await apiPost("/auth/login", { email, password });
-      goToAppWithToken(data.access_token);
+      await apiPost("/auth/login", { email, password });
+      goToAppWithCookie();
     } else {
       await apiPost("/auth/signup", { email, password });
       pendingEmail = email;
@@ -110,19 +112,21 @@ verifyForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   hideError(verifyError);
   try {
-    const data = await apiPost("/auth/verify-signup", {
+    await apiPost("/auth/verify-signup", {
       email: pendingEmail,
       code: verifyCode.value.trim(),
     });
-    goToAppWithToken(data.access_token);
+    goToAppWithCookie();
   } catch (err) {
     showError(verifyError, err.message);
   }
 });
 
-guestBtn.addEventListener("click", () => {
+guestBtn.addEventListener("click", async () => {
   // No backend call here — no chat_session_id (and therefore no DB row)
   // gets created until the guest actually uploads a document.
+  await apiPost("/auth/logout").catch(() => {});
+  localStorage.removeItem("docquery_authenticated");
   localStorage.removeItem("docquery_token");
   localStorage.removeItem("docquery_chat_session_id");
   localStorage.setItem("docquery_guest_mode", "true");
@@ -163,12 +167,12 @@ resetForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   hideError(resetError);
   try {
-    const data = await apiPost("/auth/reset-password", {
+    await apiPost("/auth/reset-password", {
       email: resetEmail,
       code: resetCode.value.trim(),
       new_password: resetNewPassword.value,
     });
-    goToAppWithToken(data.access_token);
+    goToAppWithCookie();
   } catch (err) {
     showError(resetError, err.message);
   }
@@ -189,8 +193,8 @@ window.onload = () => {
 
 async function handleGoogleCredential(response) {
   try {
-    const data = await apiPost("/auth/google", { id_token: response.credential });
-    goToAppWithToken(data.access_token);
+    await apiPost("/auth/google", { id_token: response.credential });
+    goToAppWithCookie();
   } catch (err) {
     showError(authError, err.message);
   }

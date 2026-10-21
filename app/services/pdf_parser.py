@@ -1,13 +1,25 @@
-import platform
+import os
+import shutil
+import logging
 import pymupdf as fitz
 import pytesseract
 from PIL import Image
 import io
+from app.config import (
+    MAX_OCR_PIXELS_PER_DOCUMENT,
+    MAX_OCR_PIXELS_PER_PAGE,
+    MAX_PDF_PAGES,
+)
 
-if platform.system() == "Windows":
-    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-# On Linux (Render, via Dockerfile), tesseract installs to a location
-# already on PATH, so pytesseract finds it automatically — no path needed.
+# Prefer an explicit deployment setting, then discover Tesseract on PATH.
+# When neither is available, pytesseract will raise a clear missing-binary
+# error which _ocr_page logs while allowing the rest of the PDF to proceed.
+_TESSERACT_CMD = os.getenv("TESSERACT_CMD") or shutil.which("tesseract")
+if _TESSERACT_CMD:
+    pytesseract.pytesseract.tesseract_cmd = _TESSERACT_CMD
+
+logger = logging.getLogger(__name__)
+OCR_MIN_SELECTABLE_CHARS = 40
 
 HEADING_SCORE_THRESHOLD = 3  # tune this after testing across a few PDFs
 
@@ -17,6 +29,10 @@ class PasswordProtectedPDFError(Exception):
 
 
 class CorruptPDFError(Exception):
+    pass
+
+
+class PDFResourceLimitError(Exception):
     pass
 
 
@@ -135,7 +151,8 @@ def _ocr_page(page) -> str:
     img = Image.open(io.BytesIO(pix.tobytes("png")))
     try:
         return pytesseract.image_to_string(img)
-    except Exception:
+    except Exception as e:
+        logger.warning("OCR could not process a PDF page (%s).", type(e).__name__)
         return ""
 
 
@@ -144,30 +161,51 @@ def extract_text_from_pdf(file_path: str, display_name: str | None = None):
 
     try:
         doc = fitz.open(file_path)
-    except Exception as e:
-        raise CorruptPDFError(f"Couldn't open this PDF — it may be corrupted. ({e})")
+    except Exception:
+        # Do not return parser internals or local paths to the caller.
+        raise CorruptPDFError("Couldn't open this PDF — it may be corrupted.")
 
     if doc.needs_pass:
         doc.close()
         raise PasswordProtectedPDFError("This PDF is password-protected and can't be processed.")
 
+    if doc.page_count > MAX_PDF_PAGES:
+        doc.close()
+        raise PDFResourceLimitError(
+            f"This PDF has more than the {MAX_PDF_PAGES}-page processing limit."
+        )
+
     extracted_pages = []
+    ocr_pixels_used = 0
+    try:
+        for page_number, page in enumerate(doc, start=1):
+            body_size = _get_body_font_size(page)
+            text = _extract_structured_text(page, body_size)
 
-    for page_number, page in enumerate(doc, start=1):
-        body_size = _get_body_font_size(page)
-        text = _extract_structured_text(page, body_size)
+            if len(text.strip()) < OCR_MIN_SELECTABLE_CHARS and len(page.get_images()) > 0:
+                # Keep OCR at 2x for normal pages, but skip pathological page
+                # dimensions or documents that exceed the total raster budget.
+                estimated_pixels = int(page.rect.width * page.rect.height * 4)
+                within_ocr_budget = (
+                    estimated_pixels <= MAX_OCR_PIXELS_PER_PAGE
+                    and ocr_pixels_used + estimated_pixels <= MAX_OCR_PIXELS_PER_DOCUMENT
+                )
+                if within_ocr_budget:
+                    ocr_pixels_used += estimated_pixels
+                    ocr_text = _ocr_page(page)
+                    if ocr_text.strip():
+                        text = "\n".join(part for part in (text.strip(), ocr_text.strip()) if part)
+                else:
+                    logger.warning("OCR skipped because the PDF exceeded its raster processing budget.")
 
-        if not text.strip() and len(page.get_images()) > 0:
-            text = _ocr_page(page)
-
-        if text.strip():
-            extracted_pages.append({
-                "text": text,
-                "page": page_number,
-                "source": filename
-            })
-
-    doc.close()
+            if text.strip():
+                extracted_pages.append({
+                    "text": text,
+                    "page": page_number,
+                    "source": filename
+                })
+    finally:
+        doc.close()
     return extracted_pages
 
 

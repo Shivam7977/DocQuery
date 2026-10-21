@@ -5,6 +5,7 @@ from app.services.embeddings import embed_texts
 
 
 def add_chunks(chunks: list, chat_session_id: str, db: Session) -> int:
+    """Stage chunk rows in the caller's transaction; the caller commits."""
     texts = [c["text"] for c in chunks]
     embeddings = embed_texts(texts)
 
@@ -21,7 +22,6 @@ def add_chunks(chunks: list, chat_session_id: str, db: Session) -> int:
         for c, emb in zip(chunks, embeddings)
     ]
     db.add_all(rows)
-    db.commit()
     return len(rows)
 
 
@@ -147,3 +147,46 @@ def query_chunks_per_document(query_text: str, chat_session_id: str, db: Session
         ])
 
     return results
+
+def get_distinct_section_titles(chat_session_id: str, db: Session) -> list[str]:
+    """
+    Returns every distinct, non-null section_title present in this session's
+    chunks — the candidate list that a query gets matched against for the
+    section-lookup shortcut (see query_classifier.match_section_title).
+    """
+    rows = (
+        db.query(models.DocumentChunk.section_title)
+        .filter(
+            models.DocumentChunk.chat_session_id == chat_session_id,
+            models.DocumentChunk.section_title.isnot(None),
+        )
+        .distinct()
+        .all()
+    )
+    return [row[0] for row in rows]
+
+
+def get_chunks_by_section(chat_session_id: str, section_title: str, db: Session,
+                          limit: int | None = None):
+    """
+    Returns every chunk under an exact section_title — used by the
+    section-lookup shortcut once match_section_title() has confidently
+    identified which section a query is asking about. Bypasses embedding
+    search and reranking entirely for this case; ordered by page so the
+    section reads in document order.
+    """
+    query = (
+        db.query(models.DocumentChunk)
+        .filter(
+            models.DocumentChunk.chat_session_id == chat_session_id,
+            models.DocumentChunk.section_title == section_title,
+        )
+        .order_by(models.DocumentChunk.filename, models.DocumentChunk.page)
+    )
+    if limit is not None:
+        query = query.limit(limit)
+    rows = query.all()
+    return [
+        {"text": r.text, "page": r.page, "source": r.filename, "element_type": r.element_type, "section_title": r.section_title}
+        for r in rows
+    ]

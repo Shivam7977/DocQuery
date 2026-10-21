@@ -1,5 +1,5 @@
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
 from jose import jwt, JWTError
 from google.oauth2 import id_token as google_id_token
@@ -32,6 +32,29 @@ def create_access_token(user_id: str) -> str:
 def decode_access_token(token: str) -> str | None:
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload.get("sub")
+    except JWTError:
+        return None
+
+
+GUEST_ACCESS_TTL_HOURS = 24
+
+
+def create_guest_access_token(chat_session_id: str) -> str:
+    """Create a short-lived credential bound to one temporary guest chat."""
+    expire = datetime.now(timezone.utc) + timedelta(hours=GUEST_ACCESS_TTL_HOURS)
+    return jwt.encode(
+        {"sub": chat_session_id, "typ": "guest", "exp": expire},
+        JWT_SECRET,
+        algorithm=JWT_ALGORITHM,
+    )
+
+
+def decode_guest_access_token(token: str) -> str | None:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("typ") != "guest":
+            return None
         return payload.get("sub")
     except JWTError:
         return None

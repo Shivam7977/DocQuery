@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Boolean, Integer, DateTime, ForeignKey, Text, LargeBinary
+from sqlalchemy import Column, String, Boolean, Integer, DateTime, ForeignKey, Text, LargeBinary, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from pgvector.sqlalchemy import Vector
@@ -43,6 +43,7 @@ class ChatSession(Base):
     messages = relationship("Message", back_populates="chat_session", cascade="all, delete-orphan")
     chunks = relationship("DocumentChunk", back_populates="chat_session", cascade="all, delete-orphan")
     documents = relationship("Document", back_populates="chat_session", cascade="all, delete-orphan")
+    upload_reservations = relationship("UploadReservation", back_populates="chat_session", cascade="all, delete-orphan")
 
 
 class Message(Base):
@@ -60,7 +61,7 @@ class Message(Base):
 class DocumentChunk(Base):
     __tablename__ = "document_chunks"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    chat_session_id = Column(UUID(as_uuid=True), ForeignKey("chat_sessions.id"), nullable=False)
+    chat_session_id = Column(UUID(as_uuid=True), ForeignKey("chat_sessions.id"), nullable=False, index=True)
     filename = Column(String, nullable=False)
     page = Column(Integer, nullable=False)
     text = Column(Text, nullable=False)
@@ -82,3 +83,25 @@ class Document(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     chat_session = relationship("ChatSession", back_populates="documents")
+
+
+class UploadReservation(Base):
+    """Temporary quota reservation while a PDF is being processed."""
+    __tablename__ = "upload_reservations"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    chat_session_id = Column(UUID(as_uuid=True), ForeignKey("chat_sessions.id"), nullable=False, index=True)
+    size_bytes = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    chat_session = relationship("ChatSession", back_populates="upload_reservations")
+
+
+class RateLimitBucket(Base):
+    """Persistent fixed-window counters shared by all application workers."""
+    __tablename__ = "rate_limit_buckets"
+    __table_args__ = (UniqueConstraint("subject_key", "scope", name="uq_rate_limit_subject_scope"),)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    subject_key = Column(String(64), nullable=False, index=True)
+    scope = Column(String(40), nullable=False)
+    window_start = Column(DateTime, nullable=False)
+    request_count = Column(Integer, nullable=False, default=0)

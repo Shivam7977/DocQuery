@@ -1,628 +1,349 @@
-# PrivateDoc — Intelligent PDF Research Assistant
+# PrivateDoc
 
-> Ask questions about your documents and get grounded answers with relevant source references.
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white) ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white) ![pgvector](https://img.shields.io/badge/pgvector-vector_search-336791) ![Ollama](https://img.shields.io/badge/Ollama-local_LLM-000000) ![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)
 
-PrivateDoc is a document question-answering system built around Retrieval-Augmented Generation (RAG).
+**Ask questions about your PDFs and get answers that cite the exact page.**
 
-Instead of sending an entire document to an LLM and hoping it finds the right information, PrivateDoc retrieves the most relevant sections from the uploaded PDFs, reranks them, and uses only that retrieved context to generate the final answer.
+PrivateDoc is a full-stack RAG app. Upload PDFs, ask in plain language, and read a streamed answer with its source file and page. It runs entirely on your machine with Ollama and PostgreSQL. Hosted providers are optional.
 
-The system is designed with a production-oriented architecture, measurable retrieval quality, source attribution, and a mobile-first interface.
+| | |
+|---|---|
+| **Stack** | FastAPI, PostgreSQL + pgvector, Sentence Transformers, cross-encoder reranker, Ollama |
+| **Retrieval** | Vector search + BM25, fused with Reciprocal Rank Fusion, then reranked |
+| **Result** | **90.0% strict Recall@5** on a 30-question evaluation (dense-only baseline: 76.7%) |
+| **Engineering** | Chat-level isolation, streamed answers, figure processing that cannot stall an upload |
 
----
+## Demo
 
-## ✨ What Makes PrivateDoc Different?
+**Upload with live status**
 
-This project is not just a wrapper around an LLM.
+*GIF placeholder: `docs/demo/upload.gif`*
 
-The main focus is on building and evaluating the **retrieval pipeline** that determines what information the AI sees before generating an answer.
+**Answer with source pages**
 
-The retrieval pipeline evolved through multiple stages:
+*GIF placeholder: `docs/demo/answer.gif`*
 
-```text
-PDF
- │
- ▼
-Text Extraction
- │
- ▼
-Chunking
- │
- ▼
-Embeddings
- │
- ▼
-Dense Retrieval
- │
- ▼
-BM25 Keyword Retrieval
- │
- ▼
-Reciprocal Rank Fusion (RRF)
- │
- ▼
-Cross-Encoder Reranking
- │
- ▼
-Top Relevant Context
- │
- ▼
-LLM Generation
- │
- ▼
-Grounded Answer + Sources
+**Chat history**
 
-This allows the system to combine:
+*Screenshot placeholder: `docs/demo/history.png`*
 
-Semantic similarity
-Exact keyword matching
-Reciprocal Rank Fusion
-Cross-encoder reranking
-Context-grounded generation
-Source/page attribution
-Retrieval evaluation
-🚀 Features
-📄 PDF Question Answering
+**Login**
 
-Upload a PDF and ask natural-language questions about its contents.
+*Screenshot placeholder: `docs/demo/login.png`*
 
-The system retrieves relevant passages instead of passing the entire document to the language model.
+## Architecture
 
-🔎 Hybrid Retrieval
+```mermaid
+flowchart LR
+    subgraph Client[" "]
+        UI["Browser UI<br/>HTML, CSS, JS"]
+    end
 
-Combines two different retrieval strategies:
+    subgraph Backend["FastAPI backend"]
+        AUTH["Auth<br/>password, Google, guest"]
+        UPL["Upload API<br/>+ progress endpoint"]
+        CHAT["Chat API<br/>streamed answers"]
+        PDF["PDF services<br/>text, OCR, tables, figures"]
+        RET["Retrieval<br/>vector, BM25, RRF, reranker"]
+    end
 
-Dense retrieval
+    DB[("PostgreSQL + pgvector<br/>users, chats, chunks, vectors")]
 
-Finds passages based on semantic meaning.
+    subgraph Models["Models, local by default"]
+        LLM["Text LLM<br/>Ollama or Groq"]
+        VIS["Vision LLM<br/>Ollama llava or Mistral"]
+        EMB["Embedding + reranker<br/>local Sentence Transformers"]
+    end
 
-BM25
+    EXT["External services<br/>Google sign-in, Resend email"]
 
-Finds passages based on lexical/keyword matching.
+    UI --> AUTH
+    UI --> UPL
+    UI --> CHAT
+    AUTH --> DB
+    AUTH --> EXT
+    UPL --> PDF
+    PDF --> VIS
+    PDF --> EMB
+    PDF --> DB
+    CHAT --> RET
+    RET --> DB
+    RET --> EMB
+    CHAT --> LLM
 
-These results are combined using Reciprocal Rank Fusion (RRF).
+    classDef node fill:#eef3f8,stroke:#4a6fa5,color:#1b2a3a
+    classDef store fill:#fff4e0,stroke:#b7791f,color:#3b2a0a
+    classDef ext fill:#f3f0fa,stroke:#6b5b95,color:#2a2440
+    class UI,AUTH,UPL,CHAT,PDF,RET,LLM,VIS,EMB node
+    class DB store
+    class EXT ext
+    style Client fill:none,stroke:none
+    style Backend fill:none,stroke:#8a9bb0,stroke-dasharray:4 3,color:#5a6b7d
+    style Models fill:none,stroke:#8a9bb0,stroke-dasharray:4 3,color:#5a6b7d
+```
 
-🧠 Cross-Encoder Reranking
+## How it works
 
-The initial retrieval stage intentionally retrieves a larger candidate set.
+### Ingestion: from PDF to searchable chunks
 
-For example:
+```mermaid
+flowchart TD
+    U["Upload PDF"] --> CHK["Checks<br/>PDF signature, size, page limit, chat quota"]
+    CHK --> TX["Text and heading extraction, per page"]
+    TX --> Q{"Enough selectable text on the page?"}
+    Q -- "Yes" --> PT["Page text"]
+    Q -- "No, scanned or image page" --> OCR["OCR on rendered page"]
+    OCR --> PT
+    CHK --> TAB["Table extraction"]
+    CHK --> FIG["Figure and chart descriptions<br/>dedupe, cap, timeout, caption fallback"]
+    PT --> CH["Heading-aware chunking"]
+    TAB --> CH
+    FIG --> CH
+    CH --> EMB["Embeddings<br/>all-MiniLM-L6-v2, 384 dimensions"]
+    EMB --> DB[("Save chunks and vectors<br/>indexed by chat session")]
+    TX --> TITLE["Title from page 1<br/>runs before vision model loads"]
+    TITLE --> DB
+```
 
-Hybrid Retrieval
-      ↓
-Top 20 candidates
-      ↓
-Cross-Encoder
-      ↓
-Top 5 most relevant chunks
+### Question answering: from question to cited answer
 
-This allows a more expensive relevance model to focus only on a small candidate set.
+```mermaid
+flowchart TD
+    Q["User question"] --> REF{"Follow-up with a reference word<br/>like it or that?"}
+    REF -- "Yes" --> RW["LLM rewrites the question<br/>using the last 4 messages"]
+    REF -- "No" --> SQ["Search query<br/>bare topics wrapped in a template"]
+    RW --> CLS{"Question type"}
+    SQ --> CLS
 
-📊 Retrieval Evaluation
+    CLS -- "Specific" --> HYB["Vector search + BM25<br/>within this chat's documents"]
+    HYB --> RRF["Reciprocal Rank Fusion"]
+    RRF --> RR["Cross-encoder rerank, keep top 5"]
+    RR --> THR{"Top score above threshold?"}
+    THR -- "No" --> NF["Reply: not found in documents"]
+    THR -- "Yes" --> EV
 
-The retrieval pipeline is evaluated using a manually created question dataset.
+    CLS -- "Section name" --> SEC["Exact section chunks"]
+    CLS -- "Summary" --> SPR["Evenly spread chunks per document"]
+    CLS -- "Comparison" --> PD["Top matches per document"]
+    SEC --> EV
+    SPR --> EV
+    PD --> EV
 
-The primary metric is:
+    EV["Evidence<br/>text + source file + page"] --> GEN["Answer LLM, streamed<br/>prompt labels each passage [Source, Page]"]
+    EV --> SRC["Sources event to the browser<br/>file, page, snippet"]
+    GEN --> OUT["Answer text"]
+    OUT --> HIST["Saved to chat history with its sources"]
+    SRC --> HIST
+```
 
-Strict Recall@K
+## Key engineering decisions
 
-A retrieved result counts as correct only when the expected source document and page are matched.
+| Decision | Why | Evidence |
+|---|---|---|
+| Hybrid search plus reranker | Reranking the merged candidates gave the biggest recall gain | 76.7% → 90.0% strict Recall@5 |
+| Dedupe figures before the 20-figure cap | Repeated logos were using up the cap and dropping real figures on later pages | Tested with a synthetic PDF |
+| Per-figure timeout, token cap, downscaling | One slow figure cannot block an upload | Tested with simulated timeouts |
+| Title generated before the vision model loads | Avoids swapping two models in and out of Ollama | Stage timings in the upload log |
+| Plain B-tree index per chat, not HNSW | An approximate index filtered by chat can return fewer than k results | Design choice, documented in `main.py` |
+| Full-text hash as fusion key | A key from the first 80 characters can merge two different chunks | Tested with chunks that share a prefix |
 
-This provides a more meaningful measure of whether the system actually finds the required evidence.
+## Results
 
-📚 Source Attribution
+The evaluation uses 30 questions. Each question names the expected source file and page. **Strict** matching counts a hit only if both appear in the top-k results. These are **retrieval** results. They do not measure whether generated answers are correct.
 
-Answers are accompanied by the document and page information used during retrieval.
+| Setup | Strict Recall@5 | Strict Recall@10 |
+|---|---:|---:|
+| Dense vector search only | 76.7% | 86.7% |
+| Dense + reranker | 86.7% | 90.0% |
+| Hybrid (vector + BM25, RRF) | 76.7% | 90.0% |
+| **Hybrid + reranker (current)** | **90.0%** | **96.7%** |
 
-Example:
+Files: [dataset](evaluation/dataset.json), [evaluator](evaluation/run_eval.py), [ingestion script](evaluation/ingest_all.py), [recorded results](evaluation/results_phase7.json).
 
-Answer
-│
-├── Source: report.pdf
-│   Page: 4
-│
-├── Source: report.pdf
-│   Page: 7
-│
-└── Source: report.pdf
-    Page: 12
-🛡️ Grounded Generation
+<details>
+<summary>Methodology and caveats</summary>
 
-The generation layer is instructed to answer using the retrieved context.
+- **Strict vs keyword matching.** Strict is the primary metric. Keyword matching is a secondary diagnostic only.
+- **Hybrid alone did not beat dense at top-5.** Its gain comes from the reranker stage at top-5 and from recall at top-10. At top-5, dense + reranker has a slightly higher strict MRR (0.69 vs 0.68).
+- **Small sample.** 30 questions is enough to compare setups, but a difference of one or two questions is within noise.
+- **Not answer quality.** Answer correctness is not measured yet.
 
-If the retrieved context does not contain the answer, the system can respond:
+</details>
 
-"I couldn't find this in the uploaded documents."
+## Security
 
-This reduces the risk of generating unsupported answers.
+**Implemented and covered by automated tests** (`tests/test_security_and_ocr.py`):
 
-⚡ Streaming Responses
+- Guest chats require a credential bound to that chat ID. It is HttpOnly and SameSite=Strict, and it is rejected for any other chat.
+- Requests from origins outside the allowlist are rejected.
+- The login cookie is HttpOnly, and Secure over HTTPS.
+- Uploads are rate-limited (6 per hour per client). The client key is an HMAC, not a raw IP.
+- PDFs are limited to 300 pages, and OCR has per-page and per-document pixel budgets.
 
-The application supports streaming responses so generated answers appear progressively rather than waiting for the complete response.
+**Implemented but not covered by automated tests yet:**
 
-🌐 Mobile-First UI
+- Account chats are checked against the owner, and other accounts get a 403.
+- Every retrieval query is filtered by chat session.
+- Passwords are hashed with bcrypt. Login locks for 15 minutes after 5 failed attempts.
+- Upload progress uses the same authorization check as the upload.
 
-The frontend is designed from the beginning to work across:
+**Secrets.** Settings come from environment variables or a git-ignored `.env` file. The app refuses to start without `DATABASE_URL` and `JWT_SECRET`.
 
-Desktop
-Tablet
-Mobile
-📈 Retrieval Performance
+**What leaves your machine.** The default configuration keeps all document content local.
 
-The retrieval system was evaluated on a dataset of 30 questions.
+| Feature | Provider | What is sent |
+|---|---|---|
+| Default (Ollama) | None | Nothing leaves the machine |
+| Text generation with Groq | Groq | Questions, retrieved passages, recent messages, page-1 text for the title |
+| Figure descriptions with Mistral | Mistral | Figure images and their captions |
+| Google sign-in | Google | The sign-in token, verified by the server |
+| Password reset and verification | Resend | Email address and the one-time code |
 
-Retrieval Method	Strict Recall@5	Strict Recall@10
-Dense	76.7%	86.7%
-Dense + Reranker	86.7%	90.0%
-Hybrid (BM25 + Dense)	76.7%	90.0%
-Hybrid + Reranker	90.0%	96.7%
-Best configuration
+On first run, the embedding and reranker models download from Hugging Face. No document content is sent.
 
-Hybrid Retrieval + Cross-Encoder Reranking
+## Quick start
 
-achieved:
+Requirements: Python 3.11+, PostgreSQL with pgvector, Ollama (`ollama pull llama3.2` and `ollama pull llava`), and Tesseract for OCR.
 
-Recall@5  → 90.0%
-Recall@10 → 96.7%
+```bash
+git clone https://github.com/Shivam7977/privatedoc.git
+cd privatedoc
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+cp .env.example .env        # set DATABASE_URL and JWT_SECRET
+uvicorn app.main:app --reload
+```
 
-At Recall@10, the system retrieved the expected source/page for 29 out of 30 evaluation questions.
+Open [http://localhost:8000](http://localhost:8000). API docs are at `/docs`.
 
-This evaluation was important because retrieval quality is one of the most critical components of a RAG system.
+Enable pgvector once in your database with `CREATE EXTENSION IF NOT EXISTS vector;`. The app creates its tables and indexes at startup.
 
-🏗️ Architecture
-                         ┌─────────────────┐
-                         │    PDF Upload   │
-                         └────────┬────────┘
-                                  │
-                                  ▼
-                         ┌─────────────────┐
-                         │  PDF Parser     │
-                         └────────┬────────┘
-                                  │
-                                  ▼
-                         ┌─────────────────┐
-                         │     Chunker     │
-                         └────────┬────────┘
-                                  │
-                                  ▼
-                         ┌─────────────────┐
-                         │   Embeddings    │
-                         └────────┬────────┘
-                                  │
-                                  ▼
-                         ┌─────────────────┐
-                         │    ChromaDB     │
-                         └────────┬────────┘
-                                  │
-                    ┌─────────────┴─────────────┐
-                    │                           │
-                    ▼                           ▼
-             Dense Retrieval               BM25 Search
-                    │                           │
-                    └─────────────┬─────────────┘
-                                  │
-                                  ▼
-                           RRF Fusion
-                                  │
-                                  ▼
-                         Candidate Retrieval
-                                  │
-                                  ▼
-                        Cross-Encoder Reranker
-                                  │
-                                  ▼
-                         Top Relevant Chunks
-                                  │
-                                  ▼
-                           LLM Generation
-                                  │
-                                  ▼
-                    ┌────────────────────────┐
-                    │ Answer + Source Pages │
-                    └────────────────────────┘
-🧩 Project Structure
-pdf-rag-chatbot/
-│
+> For large PDFs, run without `--reload`. Saving a Python file restarts the server and cancels any upload in progress.
+
+<details>
+<summary>Configuration</summary>
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | none | PostgreSQL connection string. Required. |
+| `JWT_SECRET` | none | Signs login and guest tokens. Required. |
+| `JWT_EXPIRE_MINUTES` | `10080` | Login token lifetime (7 days). |
+| `LLM_PROVIDER` | `ollama` | `ollama` or `groq`. |
+| `GROQ_API_KEY` | none | Required for `groq`. |
+| `VISION_PROVIDER` | `ollama` | `ollama` or `mistral`. |
+| `OLLAMA_VISION_MODEL` | `llava` | Vision model for Ollama. |
+| `MISTRAL_API_KEY` | none | Required for `mistral`. Install `mistralai` separately. |
+| `MISTRAL_VISION_MODEL` | `pixtral-12b-2409` | Vision model for Mistral. |
+| `VISION_TIMEOUT_SECONDS` | `90` | Time limit for one figure. |
+| `VISION_MAX_OUTPUT_TOKENS` | `200` | Length cap for each figure description. |
+| `VISION_MAX_SIDE_PX` | `1024` | Figures are downscaled to this size first. |
+| `VISION_KEEP_ALIVE` | `10m` | How long Ollama keeps the vision model loaded. |
+| `TESSERACT_CMD` | none | Path to Tesseract, if it is not on `PATH`. |
+| `FRONTEND_ORIGIN` | `http://localhost:8000` | Allowed origin(s), comma-separated. |
+| `GOOGLE_CLIENT_ID` | none | Enables Google sign-in. |
+| `RESEND_API_KEY`, `FROM_EMAIL` | none | Enable email codes. |
+
+</details>
+
+<details>
+<summary>Deployment</summary>
+
+The `Dockerfile` installs Tesseract and the Python dependencies, and it reads the port from `PORT`, so it runs on hosts such as Render. Ollama does not run on most free tiers, so a hosted deployment needs `LLM_PROVIDER=groq`. Plan for enough RAM to load the embedding and reranker models.
+
+</details>
+
+<details>
+<summary>API</summary>
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Health check |
+| `POST /auth/signup`, `/auth/login`, `/auth/google`, `/auth/guest` | Sign in or start a guest chat |
+| `POST /api/documents/upload` | Upload a PDF to a chat |
+| `GET /api/documents/upload/{upload_id}/progress` | Current stage of an upload |
+| `POST /chat` | Ask a question; the answer streams as server-sent events |
+| `/chats` | List, create, read, rename, delete chats |
+
+</details>
+
+
+<details>
+<summary>Troubleshooting</summary>
+
+- **Upload fails with a database error:** pgvector is not enabled. Run `CREATE EXTENSION IF NOT EXISTS vector;`.
+- **Scanned pages come back empty:** Tesseract is missing or not on `PATH`. On Windows, set `TESSERACT_CMD`.
+- **Figures are missing from answers:** check the upload log for `[visual_extractor]` and `[vision]` lines. They show which figures were described, skipped, or timed out.
+- **Slow uploads on a CPU-only machine:** figure descriptions are the main cost. Lower `VISION_MAX_OUTPUT_TOKENS` or `VISION_MAX_SIDE_PX`, or use `VISION_PROVIDER=mistral`. The `stage durations` log line shows where time goes.
+
+</details>
+
+<details>
+<summary>Limits and known gaps</summary>
+
+- 20 MB per PDF, 50 MB per chat, 300 pages per PDF, and up to 20 unique figures described per document.
+- No end-to-end processing deadline. Upload time depends on the document, hardware, and providers.
+- Upload progress is held in memory, so it works with one server process.
+- Equations are indexed as text, not converted to LaTeX.
+- Answer quality is not yet evaluated. Only retrieval is measured.
+
+</details>
+
+## Project Structure
+
+```
+PrivateDoc/
 ├── app/
 │   ├── api/
-│   │   └── chat.py
-│   │
+│   │   ├── auth.py                # Signup, login, Google sign-in, guest access
+│   │   ├── chat.py                # Streamed question answering (/chat)
+│   │   ├── chats.py               # Chat list, rename, delete
+│   │   ├── deps.py                # Auth and chat-ownership checks
+│   │   └── documents.py           # PDF upload and progress endpoint
 │   ├── db/
-│   │   └── chroma.py
-│   │
-│   ├── schemas/
-│   │   └── chat.py
-│   │
+│   │   ├── database.py            # Engine and session setup
+│   │   └── models.py              # Users, chats, messages, chunks, documents
+│   ├── schemas/                   # Request and response models
 │   ├── services/
-│   │   ├── pdf_parser.py
-│   │   ├── chunker.py
-│   │   ├── embeddings.py
-│   │   ├── retriever.py
-│   │   ├── reranker.py
-│   │   ├── hybrid_search.py
-│   │   └── llm.py
-│   │
-│   └── main.py
-│
+│   │   ├── pdf_parser.py          # Text, headings, OCR fallback
+│   │   ├── table_extractor.py     # Table detection
+│   │   ├── visual_extractor.py    # Figures and charts
+│   │   ├── vision_provider.py     # Ollama or Mistral figure descriptions
+│   │   ├── caption_utils.py       # Caption detection for figures
+│   │   ├── title_extractor.py     # Document title
+│   │   ├── chunker.py             # Heading-aware chunking
+│   │   ├── embeddings.py          # Sentence-transformer embeddings
+│   │   ├── vector_store.py        # pgvector storage and search
+│   │   ├── bm25_retriever.py      # Keyword search
+│   │   ├── hybrid_retriever.py    # Vector + BM25 fusion (RRF)
+│   │   ├── reranker.py            # Cross-encoder reranking
+│   │   ├── query_classifier.py    # Specific, section, summary, comparison
+│   │   ├── retriever.py           # Retrieval per question type
+│   │   ├── llm.py                 # Text generation and query rewriting
+│   │   ├── security.py            # Password hashing and tokens
+│   │   ├── rate_limit.py          # Upload rate limit
+│   │   ├── email.py               # Verification and reset emails
+│   │   └── cleanup.py             # Stale guest chat cleanup
+│   ├── config.py                  # Settings and limits
+│   └── main.py                    # App setup, headers, startup tasks
 ├── frontend/
-│   ├── index.html
-│   ├── style.css
-│   └── app.js
-│
+│   ├── index.html                 # Landing page
+│   ├── login.html, login.js       # Sign-in page
+│   ├── app.html, app.js           # Chat interface
+│   └── styles.css
 ├── evaluation/
-│   └── ...
-│
+│   ├── dataset.json               # 30 questions with expected source and page
+│   ├── ingest_all.py              # Loads evaluation documents
+│   ├── run_eval.py                # Retrieval evaluator
+│   └── results_phase7.json        # Recorded results
 ├── tests/
-│   └── ...
-│
-├── data/
-│   ├── uploads/
-│   └── chroma/
-│
-├── .env.example
-├── .gitignore
+│   └── test_security_and_ocr.py   # Security, OCR, and limit tests
+├── check_chunks.py                # Manual helper for answer generation
+├── Dockerfile
 ├── requirements.txt
+├── .env.example
 └── README.md
-🔄 How It Works
-1. Upload
+```
 
-The user uploads a PDF document.
+## License
 
-The backend receives and processes the document.
-
-2. Parse
-
-The PDF is converted into structured text while preserving page information.
-
-Each page remains associated with its original source.
-
-PDF
- ↓
-Page 1 → text
-Page 2 → text
-Page 3 → text
-...
-3. Chunk
-
-Long pages are divided into smaller overlapping chunks.
-
-For example:
-
-Page
- │
- ├── Chunk 1
- ├── Chunk 2
- ├── Chunk 3
- └── Chunk 4
-
-Each chunk retains metadata such as:
-
-{
-  "page": 4,
-  "source": "report.pdf"
-}
-4. Embed
-
-Each chunk is converted into a numerical vector representing its semantic meaning.
-
-These vectors allow semantically similar questions and document passages to be compared.
-
-5. Store
-
-The embeddings, original text, metadata, and chunk identifiers are stored in ChromaDB.
-
-Conceptually:
-
-Chunk
-  ↓
-Embedding
-  ↓
-Vector Database
-
-+ original text
-+ source
-+ page
-+ metadata
-6. Retrieve
-
-When a user asks a question, the question is embedded and compared against stored document vectors.
-
-Dense retrieval finds semantically similar chunks.
-
-BM25 independently searches for important lexical matches.
-
-7. Fuse
-
-The two retrieval result lists are combined using Reciprocal Rank Fusion.
-
-This gives the system both:
-
-Meaning-based retrieval
-        +
-Keyword-based retrieval
-8. Rerank
-
-The fused candidate set is passed through a cross-encoder reranker.
-
-Instead of relying only on vector similarity, the reranker directly evaluates the relationship between:
-
-Question ↔ Candidate Chunk
-
-The strongest candidates are selected for generation.
-
-9. Generate
-
-The selected chunks are provided to the LLM as context.
-
-The model is instructed to answer using the retrieved evidence rather than relying on unrelated knowledge.
-
-10. Return Sources
-
-The response includes the answer along with source/page references.
-
-🧪 Evaluation Methodology
-
-The retrieval system was evaluated using 30 manually created questions.
-
-The evaluation focuses primarily on retrieval rather than judging whether an LLM's prose "sounds correct."
-
-Primary Metric
-
-Strict Recall@K
-
-A question is counted as successfully retrieved only if the expected:
-
-source document + page
-
-appears in the top-K retrieved results.
-
-Why strict evaluation?
-
-A RAG system can produce a convincing answer even when the retrieval system selected the wrong evidence.
-
-Strict source/page evaluation makes it possible to measure the retrieval layer independently.
-
-Secondary diagnostics
-
-Keyword-based matching is used only as a diagnostic signal and is not treated as the primary retrieval metric.
-
-🤖 LLM Layer
-
-The LLM is responsible for generation, not document retrieval.
-
-The retrieval pipeline determines:
-
-"Which pieces of the document are relevant?"
-
-The LLM determines:
-
-"How should I explain those pieces to the user?"
-
-This separation is intentional.
-
-The LLM layer is designed so the inference provider can be changed without rewriting the retrieval pipeline.
-
-Local development
-
-The project can run with a local Ollama model during development.
-
-Deployment
-
-The inference layer can be configured to use a hosted provider when deploying to infrastructure that does not have sufficient resources for local model inference.
-
-This keeps the application architecture provider-agnostic.
-
-🔐 Privacy & Deployment Model
-
-PrivateDoc can be run locally with a local LLM for development and private document processing.
-
-For the deployed portfolio version, the application can use a hosted inference provider.
-
-Therefore:
-
-Local Development
-PDF → RAG Pipeline → Local LLM
-
-Deployment
-PDF → RAG Pipeline → Hosted LLM
-
-The retrieval architecture remains the same.
-
-🛠️ Tech Stack
-Backend
-Python
-FastAPI
-Retrieval
-Sentence Transformers
-BM25
-Reciprocal Rank Fusion
-Cross-Encoder Reranking
-Vector Database
-ChromaDB
-LLM
-Ollama / configurable hosted inference provider
-Frontend
-HTML
-CSS
-JavaScript
-Tailwind CSS
-Document Processing
-PyMuPDF
-📱 Frontend
-
-The interface is being designed with a mobile-first approach.
-
-Core interaction:
-
-Upload Document
-       ↓
-Ask Question
-       ↓
-Streaming Answer
-       ↓
-View Sources
-
-The UI is intentionally designed around the document-question-answering workflow rather than exposing implementation details to the user.
-
-⚠️ Current Scope & Limitations
-
-The current version deliberately focuses on reliable retrieval from typed/printed text PDFs.
-
-The following are currently outside the primary scope:
-
-OCR for scanned documents
-Handwritten documents
-Advanced table extraction
-Complex image/figure understanding
-Large-scale multilingual optimization
-Chunk-level ground-truth evaluation
-Precision@5 evaluation
-Large evaluation datasets
-
-These are potential future improvements rather than unfinished core requirements.
-
-🔮 Future Improvements
-
-Potential extensions include:
-
-OCR fallback for scanned PDFs
-Table-aware document parsing
-Figure/image understanding
-Multilingual generation and translation
-Larger evaluation datasets
-Additional retrieval metrics
-Query rewriting
-Better conversational memory
-Multiple document collections
-User authentication
-Persistent chat history
-🎯 Engineering Goals
-
-The project was built with a few principles in mind:
-
-1. Retrieval before generation
-
-A powerful LLM cannot compensate for consistently poor retrieval.
-
-2. Measure instead of assuming
-
-Retrieval strategies are compared using a fixed evaluation dataset.
-
-3. Modular architecture
-
-Parsing, chunking, embedding, retrieval, reranking, generation, and API layers are separated.
-
-4. Provider independence
-
-The LLM inference layer is isolated from the core RAG pipeline.
-
-5. Production-oriented design
-
-The application is designed with:
-
-API separation
-Configuration management
-Health checks
-Streaming responses
-Source attribution
-Evaluation
-Deployment considerations
-🚀 Running Locally
-Clone the repository
-git clone <YOUR_REPOSITORY_URL>
-cd pdf-rag-chatbot
-Create virtual environment
-python -m venv venv
-
-Activate it on Windows:
-
-venv\Scripts\Activate.ps1
-Install dependencies
-pip install -r requirements.txt
-Configure environment variables
-
-Create a .env file based on:
-
-.env.example
-Start the API
-uvicorn app.main:app --reload
-
-The API will be available at:
-
-http://localhost:8000
-
-FastAPI documentation:
-
-http://localhost:8000/docs
-📡 API
-Health Check
-GET /health
-Chat
-POST /chat
-
-Example:
-
-{
-  "question": "What are global South funds?"
-}
-
-Example response:
-
-{
-  "answer": "Global South funds ...",
-  "sources": [
-    {
-      "page": 1,
-      "source": "report.pdf",
-      "text": "..."
-    }
-  ]
-}
-📊 Project Progress
-Component	Status
-PDF parsing	✅
-Chunking	✅
-Embeddings	✅
-Vector storage	✅
-Dense retrieval	✅
-Cross-encoder reranking	✅
-Retrieval evaluation	✅
-Hybrid BM25 + Dense search	✅
-RRF fusion	✅
-Source attribution	✅
-Grounded generation	✅
-SSE streaming	✅
-Mobile-first frontend	🚧
-File upload UI	🚧
-Cloud deployment	🚧
-Persistent chat history	🔜
-📜 License
-
-This project is intended as a portfolio and learning project.
-
-Add your preferred license here.
-
-👨‍💻 Why I Built This
-
-The goal of this project was not simply to connect a PDF to an LLM.
-
-The goal was to understand what happens before the LLM generates an answer:
-
-How do we find the right information from a document?
-
-By progressively comparing dense retrieval, reranking, hybrid search, and fusion techniques, the project turns that question into something measurable rather than relying on subjective answer quality.
-
-The final retrieval pipeline achieved:
-
-90.0% strict Recall@5
-96.7% strict Recall@10
-
-on the current 30-question evaluation set.
-
-flagships
-
-1. Conversational follow-up questions (mera top recommendation)
-2. Answer confidence score dikhana
-3. Auto-generated document summary on upload
-4. Multi-document comparison mode
-
-per pdf limit 20 mb and complete chat limit  50 mb.
+MIT. See [LICENSE](LICENSE).

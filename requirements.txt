@@ -7,6 +7,7 @@ langchain-text-splitters
 sentence-transformers
 rank-bm25
 ollama
+mistralai>=1.12.4,<2
 groq
 python-multipart
 pydantic

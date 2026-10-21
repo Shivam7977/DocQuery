@@ -1,13 +1,14 @@
-import sys
+import argparse
 import json
-sys.path.append(".")
-from app.db.chroma import query_collection
-from app.services.reranker import rerank_chunks
-from app.services.hybrid_retriever import hybrid_search
+from pathlib import Path
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 
-def load_dataset():
-    with open("evaluation/dataset.json", "r", encoding="utf-8") as f:
+def load_dataset(dataset_path: Path):
+    with dataset_path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -35,16 +36,14 @@ def find_rank(chunks, item, match_fn):
     return None
 
 
-def dense_retrieve(question, fetch_k):
-    """Wraps query_collection() so it returns the same chunk shape as hybrid_search()."""
-    results = query_collection(question, top_k=fetch_k)
-    documents = results["documents"][0]
-    metadatas = results["metadatas"][0]
-    return [{"text": d, "page": m["page"], "source": m["source"]}
-            for d, m in zip(documents, metadatas)]
+def dense_retrieve(question, fetch_k, chat_session_id, db):
+    """Use the same PostgreSQL/pgvector path as the application."""
+    from app.services.vector_store import query_chunks
+
+    return query_chunks(question, chat_session_id, top_k=fetch_k, db=db)
 
 
-def evaluate(dataset, top_k, retrieval_mode="dense", use_reranker=False, initial_k=20):
+def evaluate(dataset, chat_session_id, db, top_k, retrieval_mode="dense", use_reranker=False, initial_k=20):
     """
     retrieval_mode: "dense" or "hybrid"
     use_reranker: whether to rerank the fetched candidates down to top_k
@@ -54,13 +53,16 @@ def evaluate(dataset, top_k, retrieval_mode="dense", use_reranker=False, initial
     strict_hits = 0
     keyword_hits = 0
 
+    from app.services.hybrid_retriever import hybrid_search
+    from app.services.reranker import rerank_chunks
+
     for item in dataset:
         fetch_k = initial_k if use_reranker else top_k
 
         if retrieval_mode == "hybrid":
-            chunks = hybrid_search(item["question"], top_k=fetch_k)
+            chunks = hybrid_search(item["question"], chat_session_id, db, top_k=fetch_k)
         else:
-            chunks = dense_retrieve(item["question"], fetch_k)
+            chunks = dense_retrieve(item["question"], fetch_k, chat_session_id, db)
 
         if use_reranker:
             chunks = rerank_chunks(item["question"], chunks, top_k=top_k)
@@ -107,27 +109,39 @@ def print_results(label, results, show_mrr):
 
 
 if __name__ == "__main__":
-    dataset = load_dataset()
+    parser = argparse.ArgumentParser(description="Evaluate retrieval on an existing chat session.")
+    parser.add_argument("--chat-session-id", required=True,
+                        help="UUID of a chat containing the evaluation PDFs and indexed chunks")
+    parser.add_argument("--dataset", type=Path, default=Path("evaluation/dataset.json"))
+    parser.add_argument("--output", type=Path,
+                        help="Optional path for JSON results; omitted means no file is written")
+    args = parser.parse_args()
+
+    dataset = load_dataset(args.dataset)
     print(f"Evaluating on {len(dataset)} questions...\n")
-
     all_results = {}
+    from app.db.database import SessionLocal
 
-    for k in [5, 10]:
-        combos = [
-            ("DENSE (baseline)", "dense", False),
-            ("DENSE + RERANKER", "dense", True),
-            ("HYBRID (BM25 + dense, RRF)", "hybrid", False),
-            ("HYBRID + RERANKER", "hybrid", True),
-        ]
-        for label, mode, use_reranker in combos:
-            res = evaluate(dataset, top_k=k, retrieval_mode=mode, use_reranker=use_reranker)
-            print_results(f"{label}, top-{k}", res, show_mrr=(k == 5))
-            all_results[f"{label} | top-{k}"] = res
-
-    with open("evaluation/results_phase7.json", "w", encoding="utf-8") as f:
-        json.dump(all_results, f, indent=2)
+    db = SessionLocal()
+    try:
+        for k in [5, 10]:
+            combos = [
+                ("DENSE (baseline)", "dense", False),
+                ("DENSE + RERANKER", "dense", True),
+                ("HYBRID (BM25 + dense, RRF)", "hybrid", False),
+                ("HYBRID + RERANKER", "hybrid", True),
+            ]
+            for label, mode, use_reranker in combos:
+                res = evaluate(dataset, args.chat_session_id, db, top_k=k,
+                               retrieval_mode=mode, use_reranker=use_reranker)
+                print_results(f"{label}, top-{k}", res, show_mrr=(k == 5))
+                all_results[f"{label} | top-{k}"] = res
+    finally:
+        db.close()
 
     print("Note: 'Strict match' requires exact source+page match (narrow ground truth).")
-    print("'Keyword-assist' additionally counts chunks from the right document")
-    print("containing most expected keywords, even if the page differs slightly.")
-    print("\nFull results saved to evaluation/results_phase7.json")
+    print("'Keyword-assist' counts chunks from the right document containing most expected keywords.")
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(all_results, indent=2), encoding="utf-8")
+        print(f"\nFull results saved to {args.output}")

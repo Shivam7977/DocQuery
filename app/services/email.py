@@ -36,7 +36,7 @@ def send_welcome_email(to_email: str):
             """,
         })
     except Exception as e:
-        print(f"[email] Failed to send welcome email to {to_email}: {e}")
+        print(f"[email] Welcome email delivery failed ({type(e).__name__}).")
 
 
 def send_password_reset_email(to_email: str, code: str):
@@ -62,7 +62,7 @@ def send_password_reset_email(to_email: str, code: str):
             """,
         })
     except Exception as e:
-        print(f"[email] Failed to send password-reset email to {to_email}: {e}")
+        print(f"[email] Password-reset email delivery failed ({type(e).__name__}).")
 
 
 def send_google_only_reset_notice(to_email: str):
@@ -87,4 +87,4 @@ def send_google_only_reset_notice(to_email: str):
             """,
         })
     except Exception as e:
-        print(f"[email] Failed to send Google-only notice to {to_email}: {e}")
+        print(f"[email] Account notice delivery failed ({type(e).__name__}).")

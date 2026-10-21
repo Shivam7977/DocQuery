@@ -1,3 +1,5 @@
+import hashlib
+
 from app.services.vector_store import query_chunks
 from app.services.bm25_retriever import bm25_search
 
@@ -5,7 +7,11 @@ RRF_K = 60
 
 
 def _chunk_key(source: str, page, text: str) -> str:
-    return f"{source}|{page}|{text[:80]}"
+    # Hash the full text. A key built from the first 80 characters can collide
+    # for chunks that share a section prefix, and a collision silently drops
+    # one of them from the fused results.
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return f"{source}|{page}|{digest}"
 
 
 def reciprocal_rank_fusion(dense_results, bm25_results, top_k: int = 20):

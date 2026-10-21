@@ -1,7 +1,23 @@
+# Local environments and caches
 venv/
+.venv/
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+
+# Secrets: never bake settings into the image. Set them in the platform instead.
 .env
-data/uploads/*
+.env.*
+!.env.example
+
+# Runtime data. This includes user PDFs, the legacy Chroma store, and the stale
+# BM25 file. None of it belongs in the image. The Dockerfile recreates the
+# empty data/uploads folder at build time.
+data/
+
+# Version control and editor files
 .git/
 .gitignore
+.vscode/
+.idea/

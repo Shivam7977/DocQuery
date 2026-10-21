@@ -1,12 +1,12 @@
 import json
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response, Cookie, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from app.db.database import get_db
 from app.db import models
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, authorize_chat_session
 from app.services.bm25_retriever import invalidate_bm25_index
 
 router = APIRouter(prefix="/chats", tags=["chats"])
@@ -16,11 +16,9 @@ class RenameChatRequest(BaseModel):
     title: str
 
 
-def _check_ownership(session: models.ChatSession, user: models.User | None):
-    if not session:
-        raise HTTPException(status_code=404, detail="Chat not found.")
-    if session.user_id is not None and (not user or session.user_id != user.id):
-        raise HTTPException(status_code=403, detail="This chat belongs to another account.")
+def _check_ownership(session: models.ChatSession, user: models.User | None,
+                     guest_access: str | None, request: Request, response: Response):
+    authorize_chat_session(session, user, guest_access, request, response)
 
 
 @router.post("")
@@ -63,9 +61,9 @@ def list_chats(db: Session = Depends(get_db), user: models.User | None = Depends
 # by plain strings — see the note in chat.py).
 
 @router.get("/{chat_session_id}")
-def get_chat(chat_session_id: UUID, db: Session = Depends(get_db), user: models.User | None = Depends(get_current_user)):
+def get_chat(chat_session_id: UUID, request: Request, response: Response, db: Session = Depends(get_db), user: models.User | None = Depends(get_current_user), guest_access: str | None = Cookie(default=None)):
     session = db.query(models.ChatSession).filter(models.ChatSession.id == chat_session_id).first()
-    _check_ownership(session, user)
+    _check_ownership(session, user, guest_access, request, response)
 
     messages = (
         db.query(models.Message)
@@ -101,9 +99,9 @@ def get_chat(chat_session_id: UUID, db: Session = Depends(get_db), user: models.
 
 
 @router.patch("/{chat_session_id}")
-def rename_chat(chat_session_id: UUID, payload: RenameChatRequest, db: Session = Depends(get_db), user: models.User | None = Depends(get_current_user)):
+def rename_chat(chat_session_id: UUID, payload: RenameChatRequest, request: Request, response: Response, db: Session = Depends(get_db), user: models.User | None = Depends(get_current_user), guest_access: str | None = Cookie(default=None)):
     session = db.query(models.ChatSession).filter(models.ChatSession.id == chat_session_id).first()
-    _check_ownership(session, user)
+    _check_ownership(session, user, guest_access, request, response)
 
     title = payload.title.strip()
     if not title:
@@ -115,9 +113,9 @@ def rename_chat(chat_session_id: UUID, payload: RenameChatRequest, db: Session =
 
 
 @router.get("/{chat_session_id}/documents/{filename}")
-def get_document_file(chat_session_id: UUID, filename: str, db: Session = Depends(get_db), user: models.User | None = Depends(get_current_user)):
+def get_document_file(chat_session_id: UUID, filename: str, request: Request, response: Response, db: Session = Depends(get_db), user: models.User | None = Depends(get_current_user), guest_access: str | None = Cookie(default=None)):
     session = db.query(models.ChatSession).filter(models.ChatSession.id == chat_session_id).first()
-    _check_ownership(session, user)
+    _check_ownership(session, user, guest_access, request, response)
 
     doc = (
         db.query(models.Document)
@@ -131,9 +129,9 @@ def get_document_file(chat_session_id: UUID, filename: str, db: Session = Depend
 
 
 @router.delete("/{chat_session_id}")
-def delete_chat(chat_session_id: UUID, db: Session = Depends(get_db), user: models.User | None = Depends(get_current_user)):
+def delete_chat(chat_session_id: UUID, request: Request, response: Response, db: Session = Depends(get_db), user: models.User | None = Depends(get_current_user), guest_access: str | None = Cookie(default=None)):
     session = db.query(models.ChatSession).filter(models.ChatSession.id == chat_session_id).first()
-    _check_ownership(session, user)
+    _check_ownership(session, user, guest_access, request, response)
 
     db.delete(session)
     db.commit()

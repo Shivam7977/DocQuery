@@ -1,10 +1,12 @@
 const API_BASE = "";
 let CHAT_SESSION_ID = localStorage.getItem("docquery_chat_session_id");
-const TOKEN = localStorage.getItem("docquery_token");
+let IS_AUTHENTICATED = localStorage.getItem("docquery_authenticated") === "true";
+// Remove the legacy browser-readable bearer token after migrating to cookies.
+localStorage.removeItem("docquery_token");
 const IS_GUEST_MODE = localStorage.getItem("docquery_guest_mode") === "true";
 let lastRenderedDateKey = null;
 
-if (!TOKEN && !IS_GUEST_MODE) {
+if (!IS_AUTHENTICATED && !IS_GUEST_MODE) {
   window.location.href = "login.html";
 }
 
@@ -62,7 +64,7 @@ const previewCloseBtn = document.getElementById("preview-close-btn");
 const IS_MOBILE = () => window.innerWidth <= 768;
 
 function authHeaders(extra = {}) {
-  return TOKEN ? { ...extra, Authorization: `Bearer ${TOKEN}` } : extra;
+  return extra;
 }
 
 /* ============================================
@@ -76,7 +78,7 @@ async function openDocumentPreview(filename, page) {
   try {
     const res = await fetch(
       API_BASE + `/chats/${CHAT_SESSION_ID}/documents/${encodeURIComponent(filename)}`,
-      { headers: authHeaders() }
+      { headers: authHeaders(), credentials: "include" }
     );
     if (!res.ok) throw new Error("Couldn't load this document.");
 
@@ -147,15 +149,18 @@ documentsToggle.addEventListener("click", (e) => {
    USER AREA
    ============================================ */
 async function initUserArea() {
-  if (TOKEN) {
+  if (IS_AUTHENTICATED) {
     try {
-      const res = await fetch(API_BASE + "/auth/me", { headers: authHeaders() });
+      const res = await fetch(API_BASE + "/auth/me", { headers: authHeaders(), credentials: "include" });
+      if (!res.ok) throw new Error("Authentication expired.");
       const data = await res.json();
       sidebarUserName.textContent = data.email;
       sidebarUserAvatar.textContent = data.email[0].toUpperCase();
     } catch {
-      sidebarUserName.textContent = "Account";
-      sidebarUserAvatar.textContent = "?";
+      IS_AUTHENTICATED = false;
+      localStorage.removeItem("docquery_authenticated");
+      window.location.href = "login.html";
+      return;
     }
     sidebarUserMenu.innerHTML = `
       <button type="button" class="sidebar-user-menu-item" id="settings-btn">Settings</button>
@@ -195,10 +200,13 @@ async function initUserArea() {
   const logoutBtn = document.getElementById("logout-btn");
   if (logoutBtn) {
     logoutBtn.addEventListener("click", () => {
-      localStorage.removeItem("docquery_token");
-      localStorage.removeItem("docquery_chat_session_id");
-      localStorage.removeItem("docquery_guest_mode");
-      window.location.href = "index.html";
+      fetch(API_BASE + "/auth/logout", { method: "POST", credentials: "include" }).catch(() => {}).finally(() => {
+        localStorage.removeItem("docquery_authenticated");
+        localStorage.removeItem("docquery_token");
+        localStorage.removeItem("docquery_chat_session_id");
+        localStorage.removeItem("docquery_guest_mode");
+        window.location.href = "index.html";
+      });
     });
   }
 }
@@ -206,12 +214,12 @@ async function initUserArea() {
    SIDEBAR CHAT LIST (with rename)
    ============================================ */
 async function loadChatList() {
-  if (!TOKEN) {
+  if (!IS_AUTHENTICATED) {
     sidebarChatList.innerHTML = `<li class="sidebar-chat-hint">Log in to save and revisit chats.</li>`;
     return;
   }
 
-  const res = await fetch(API_BASE + "/chats", { headers: authHeaders() });
+  const res = await fetch(API_BASE + "/chats", { headers: authHeaders(), credentials: "include" });
   if (!res.ok) return;
   const list = await res.json();
 
@@ -316,6 +324,7 @@ function startRename(li, titleSpan, chatId, currentTitle) {
         method: "PATCH",
         headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ title: newTitle }),
+        credentials: "include",
       });
       if (chatId === CHAT_SESSION_ID) currentChatTitle.textContent = newTitle;
     }
@@ -342,6 +351,7 @@ deleteConfirmBtn.addEventListener("click", async () => {
     await fetch(API_BASE + `/chats/${chatBeingDeleted}`, {
       method: "DELETE",
       headers: authHeaders(),
+      credentials: "include",
     });
   } catch (err) {
     console.error(err);
@@ -376,8 +386,13 @@ async function openChat(chatId) {
 
   resetChatUI(false);
 
-  const res = await fetch(API_BASE + `/chats/${chatId}`, { headers: authHeaders() });
+  const res = await fetch(API_BASE + `/chats/${chatId}`, { headers: authHeaders(), credentials: "include" });
   if (!res.ok) {
+    if (res.status === 403 && IS_GUEST_MODE) {
+      resetChatUI();
+      showUploadStatus("This guest chat predates the new security check. Start a new guest chat and re-upload your PDF.", true);
+      return;
+    }
     await loadChatList();
     return;
   }
@@ -453,8 +468,8 @@ function renderDocumentsList(filenames) {
 async function ensureChatSession() {
   if (CHAT_SESSION_ID) return CHAT_SESSION_ID;
 
-  const endpoint = TOKEN ? "/chats" : "/auth/guest";
-  const res = await fetch(API_BASE + endpoint, { method: "POST", headers: authHeaders() });
+  const endpoint = IS_AUTHENTICATED ? "/chats" : "/auth/guest";
+  const res = await fetch(API_BASE + endpoint, { method: "POST", headers: authHeaders(), credentials: "include" });
   if (!res.ok) throw new Error("Couldn't start a new chat.");
   const data = await res.json();
 
@@ -500,11 +515,13 @@ async function handleFile(file) {
   try {
     const chatSessionId = await ensureChatSession();
 
+    const uploadId = newUploadId();
     const formData = new FormData();
     formData.append("file", file);
     formData.append("chat_session_id", chatSessionId);
+    formData.append("upload_id", uploadId);
 
-    const data = await uploadWithProgress(formData);
+    const data = await uploadWithProgress(formData, uploadId, chatSessionId);
 
     uploadProgress.hidden = true;
     state.documentReady = true;
@@ -527,11 +544,68 @@ async function handleFile(file) {
   }
 }
 
-function uploadWithProgress(formData) {
+function newUploadId() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  // Fallback for older browsers: RFC 4122 version-4 shape from random bytes.
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+function formatElapsed(totalSeconds) {
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const m = Math.floor(totalSeconds / 60);
+  const s = String(totalSeconds % 60).padStart(2, "0");
+  return `${m}m ${s}s`;
+}
+
+const PROGRESS_POLL_MS = 1500;
+
+function uploadWithProgress(formData, uploadId, chatSessionId) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", API_BASE + CONFIG.UPLOAD_ENDPOINT);
-    if (TOKEN) xhr.setRequestHeader("Authorization", `Bearer ${TOKEN}`);
+    xhr.withCredentials = true;
+
+    let processingStartedAt = null;
+    let currentLabel = "Processing document";
+    let currentDetail = null;
+    let pollTimer = null;
+    let tickTimer = null;
+
+    const stopTimers = () => {
+      clearInterval(pollTimer);
+      clearInterval(tickTimer);
+    };
+
+    // Shows "Stage · detail · elapsed" under the dropzone. The elapsed timer
+    // ticks every second on its own, so the user can see the upload is alive
+    // even while the server is still inside one long stage.
+    const renderProcessingStatus = () => {
+      if (processingStartedAt === null) return;
+      const elapsed = Math.floor((Date.now() - processingStartedAt) / 1000);
+      const parts = [`${currentLabel}…`];
+      if (currentDetail) parts.push(currentDetail);
+      parts.push(formatElapsed(elapsed));
+      showUploadStatus(parts.join(" · "), false);
+    };
+
+    const pollProgress = async () => {
+      try {
+        const url = `${API_BASE}${CONFIG.UPLOAD_ENDPOINT}/${uploadId}/progress`
+          + `?chat_session_id=${encodeURIComponent(chatSessionId)}`;
+        const res = await fetch(url, { credentials: "include" });
+        if (!res.ok) return; // not started yet, or finished: keep the current text
+        const info = await res.json();
+        currentLabel = info.label || currentLabel;
+        currentDetail = info.detail || null;
+        renderProcessingStatus();
+      } catch {
+        // Progress is best-effort. The upload request itself decides the outcome.
+      }
+    };
 
     xhr.upload.addEventListener("progress", (e) => {
       if (e.lengthComputable) {
@@ -542,14 +616,19 @@ function uploadWithProgress(formData) {
     });
 
     xhr.upload.addEventListener("load", () => {
-      // Upload finished, server is now parsing/embedding — we don't get
-      // real progress for this part (it's one request-response), so show
-      // an indicative "processing" state instead of a stalled progress bar.
+      // The file has reached the server. Server processing starts now, so
+      // switch to stage-based status instead of a bare spinner.
       dropzoneText.textContent = "Processing document…";
       uploadProgressBar.classList.add("is-indeterminate");
+      processingStartedAt = Date.now();
+      renderProcessingStatus();
+      pollProgress();
+      pollTimer = setInterval(pollProgress, PROGRESS_POLL_MS);
+      tickTimer = setInterval(renderProcessingStatus, 1000);
     });
 
     xhr.onload = () => {
+      stopTimers();
       let data;
       try { data = JSON.parse(xhr.responseText); } catch { data = {}; }
       if (xhr.status >= 200 && xhr.status < 300) {
@@ -559,7 +638,10 @@ function uploadWithProgress(formData) {
       }
       uploadProgressBar.classList.remove("is-indeterminate");
     };
-    xhr.onerror = () => reject(new Error("Network error during upload."));
+    xhr.onerror = () => {
+      stopTimers();
+      reject(new Error("Network error during upload."));
+    };
 
     xhr.send(formData);
   });
@@ -615,6 +697,7 @@ async function streamAnswer(message, assistantEl) {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ chat_session_id: CHAT_SESSION_ID, question: message }),
+    credentials: "include",
   });
 
   if (!res.ok || !res.body) {
@@ -661,7 +744,7 @@ async function streamAnswer(message, assistantEl) {
   await loadChatList(); // title may have just been auto-set from this question
   if (currentChatTitle.textContent === "New chat") {
     // Refresh the topbar title too, once the backend has renamed it.
-    const res2 = await fetch(API_BASE + `/chats/${CHAT_SESSION_ID}`, { headers: authHeaders() });
+    const res2 = await fetch(API_BASE + `/chats/${CHAT_SESSION_ID}`, { headers: authHeaders(), credentials: "include" });
     if (res2.ok) {
       const data2 = await res2.json();
       currentChatTitle.textContent = data2.title || "New chat";
