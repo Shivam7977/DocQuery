@@ -224,7 +224,9 @@ async function loadChatList() {
   const list = await res.json();
 
   sidebarChatList.innerHTML = "";
-  list.forEach((c) => {
+  list
+    .filter((c) => !pendingDelete || c.id !== pendingDelete.chatId)
+    .forEach((c) => {
     const li = document.createElement("li");
     li.className = "sidebar-chat-item";
     if (c.id === CHAT_SESSION_ID) li.classList.add("is-active");
@@ -338,33 +340,134 @@ function startRename(li, titleSpan, chatId, currentTitle) {
   });
 }
 
-deleteCancelBtn.addEventListener("click", () => {
+/* ============================================
+   DELETE CHAT, WITH UNDO
+   A delete waits UNDO_WINDOW_MS before it reaches the server, so Undo can
+   cancel it. Only one delete is pending at a time: starting another one sends
+   the earlier one right away.
+   ============================================ */
+const UNDO_WINDOW_MS = 6000;
+let pendingDelete = null; // { chatId, wasCurrent, timer }
+let toastTimer = null;
+
+const undoToast = document.getElementById("undo-toast");
+const undoToastText = document.getElementById("undo-toast-text");
+const undoToastBtn = document.getElementById("undo-toast-btn");
+const undoToastBar = document.getElementById("undo-toast-bar");
+
+function closeDeleteConfirm() {
   chatBeingDeleted = null;
   deleteOverlay.hidden = true;
+}
+
+deleteCancelBtn.addEventListener("click", closeDeleteConfirm);
+
+// Clicking the dimmed background or pressing Escape also cancels.
+deleteOverlay.addEventListener("click", (e) => {
+  if (e.target === deleteOverlay) closeDeleteConfirm();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !deleteOverlay.hidden) closeDeleteConfirm();
 });
 
-deleteConfirmBtn.addEventListener("click", async () => {
+deleteConfirmBtn.addEventListener("click", () => {
   if (!chatBeingDeleted) return;
-  const deletingCurrentChat = chatBeingDeleted === CHAT_SESSION_ID;
+  const chatId = chatBeingDeleted;
+  closeDeleteConfirm(); // close at once, so a second click cannot re-trigger it
+  scheduleDelete(chatId);
+});
 
+function scheduleDelete(chatId) {
+  if (pendingDelete) commitPendingDelete();
+
+  const wasCurrent = chatId === CHAT_SESSION_ID;
+  pendingDelete = { chatId, wasCurrent, timer: null };
+  pendingDelete.timer = setTimeout(commitPendingDelete, UNDO_WINDOW_MS);
+
+  if (wasCurrent) resetChatUI();
+  loadChatList(); // the chat is hidden from the sidebar during the undo window
+  showToast("Chat deleted.", { undo: true, duration: UNDO_WINDOW_MS });
+}
+
+async function commitPendingDelete() {
+  const pending = pendingDelete;
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pendingDelete = null;
+  hideToast();
+
+  const ok = await sendDeleteRequest(pending.chatId);
+  if (!ok) {
+    showToast("Could not delete the chat. It has been restored.", { isError: true, duration: 4000 });
+  }
+  await loadChatList();
+}
+
+function undoPendingDelete() {
+  const pending = pendingDelete;
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pendingDelete = null;
+  hideToast();
+
+  if (pending.wasCurrent) {
+    openChat(pending.chatId); // bring back the chat the user was looking at
+  } else {
+    loadChatList();
+  }
+}
+
+async function sendDeleteRequest(chatId) {
   try {
-    await fetch(API_BASE + `/chats/${chatBeingDeleted}`, {
+    const res = await fetch(API_BASE + `/chats/${chatId}`, {
       method: "DELETE",
       headers: authHeaders(),
       credentials: "include",
     });
+    return res.ok;
   } catch (err) {
     console.error(err);
+    return false;
   }
+}
 
-  deleteOverlay.hidden = true;
-  chatBeingDeleted = null;
-
-  if (deletingCurrentChat) {
-    resetChatUI();
-  }
-  await loadChatList();
+// If the page is closed or reloaded during the undo window, send the delete
+// now. keepalive lets the request finish after the page has gone.
+window.addEventListener("pagehide", () => {
+  if (!pendingDelete) return;
+  fetch(API_BASE + `/chats/${pendingDelete.chatId}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+    credentials: "include",
+    keepalive: true,
+  }).catch(() => {});
+  pendingDelete = null;
 });
+
+function showToast(message, { undo = false, isError = false, duration = 4000 } = {}) {
+  clearTimeout(toastTimer);
+  undoToastText.textContent = message;
+  undoToast.classList.toggle("is-error", isError);
+  undoToastBtn.hidden = !undo;
+  undoToastBar.hidden = !undo;
+
+  if (undo) {
+    // Restart the countdown bar from full width every time.
+    undoToastBar.style.animation = "none";
+    void undoToastBar.offsetWidth;
+    undoToastBar.style.animation = `undo-countdown ${duration}ms linear forwards`;
+  } else {
+    toastTimer = setTimeout(hideToast, duration);
+  }
+  undoToast.hidden = false;
+}
+
+function hideToast() {
+  clearTimeout(toastTimer);
+  undoToast.hidden = true;
+}
+
+undoToastBtn.addEventListener("click", undoPendingDelete);
 
 /* ============================================
    INIT

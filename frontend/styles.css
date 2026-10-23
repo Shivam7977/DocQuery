@@ -1633,3 +1633,61 @@ section {
   border-top: 1px solid var(--color-border);
   margin: 4px 0;
 }
+
+/* ============================================
+   UNDO TOAST
+   ============================================ */
+.undo-toast {
+  position: fixed;
+  left: 50%;
+  bottom: var(--space-5);
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 260px;
+  max-width: calc(100% - 32px);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-ink);
+  color: var(--color-surface-raised);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+.undo-toast[hidden] { display: none; }
+.undo-toast.is-error { background: var(--color-error); }
+
+.undo-toast-text {
+  flex: 1;
+  font-size: 0.92rem;
+}
+
+.undo-toast-btn {
+  background: none;
+  border: none;
+  color: var(--color-accent);
+  font-weight: 600;
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+  border-radius: 6px;
+}
+.undo-toast-btn:hover { background: rgba(255, 255, 255, 0.08); }
+.undo-toast-btn[hidden] { display: none; }
+
+/* Countdown bar along the bottom edge, shrinking until the delete is sent. */
+.undo-toast-bar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 3px;
+  background: var(--color-accent);
+  transform-origin: left center;
+}
+.undo-toast-bar[hidden] { display: none; }
+
+@keyframes undo-countdown {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}

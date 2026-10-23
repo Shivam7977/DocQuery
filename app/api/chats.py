@@ -8,6 +8,7 @@ from app.db.database import get_db
 from app.db import models
 from app.api.deps import get_current_user, authorize_chat_session
 from app.services.bm25_retriever import invalidate_bm25_index
+from app.services.chat_deletion import delete_chat_session
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 
@@ -133,8 +134,7 @@ def delete_chat(chat_session_id: UUID, request: Request, response: Response, db:
     session = db.query(models.ChatSession).filter(models.ChatSession.id == chat_session_id).first()
     _check_ownership(session, user, guest_access, request, response)
 
-    db.delete(session)
-    db.commit()
+    delete_chat_session(db, session.id)
 
     # Was missing before — the in-memory BM25 index for this session would
     # otherwise outlive the (now-deleted) session's data until server
