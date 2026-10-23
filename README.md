@@ -15,7 +15,7 @@ DocQuery is a full-stack RAG app. Upload PDFs, ask in plain language, and read a
 
 ## Demo
 
-**Landing page**
+**Landing page**:The landing page explains the product and lets visitors start a guest chat or sign in.
 
 ![Landing page](docs/demo/dashboard.png)
 
