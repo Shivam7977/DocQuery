@@ -15,30 +15,25 @@ DocQuery is a full-stack RAG app. Upload PDFs, ask in plain language, and read a
 
 ## Demo
 
-**Landing page** : The landing page explains the product and lets visitors start a guest chat or sign in.
+**Landing page**  : The landing page explains the product and lets visitors start a guest chat or sign in.
 
 ![Landing page](docs/demo/dashboard.png)
-
-
-**Upload with live status**  : While a PDF is processed, the status line shows the current stage and a live timer.
-
-![Upload with live status](docs/demo/upload.png)
-
-
-**Answer with source pages**  : Each answer lists the file and page of every passage it was built from.
-
-![Answer with source pages](docs/demo/answer.png)
-
-
-**Chat history and undo**  : Chats are listed in the sidebar. Deleting one shows an Undo option for six seconds before the delete is final.
-
-![Chat history and undo](docs/demo/history.png)
-
 
 **Login**  : Sign in with email and password, with Google, or continue as a guest.
 
 ![Login](docs/demo/login.png)
 
+**Upload with live status**  : While a PDF is processed, the status line shows the current stage and a live timer.
+
+![Upload with live status](docs/demo/upload.png)
+
+**Answer with source pages**  : Each answer lists the file and page of every passage it was built from.
+
+![Answer with source pages](docs/demo/answer.png)
+
+**Chat history and undo**  : Chats are listed in the sidebar. Deleting one shows an Undo option for six seconds before the delete is final.
+
+![Chat history and undo](docs/demo/history.png)
 
 ## Architecture
 
