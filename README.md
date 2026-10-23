@@ -1,10 +1,10 @@
-# PrivateDoc
+# DocQuery
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white) ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white) ![pgvector](https://img.shields.io/badge/pgvector-vector_search-336791) ![Ollama](https://img.shields.io/badge/Ollama-local_LLM-000000) ![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)
 
 **Ask questions about your PDFs and get answers that cite the exact page.**
 
-PrivateDoc is a full-stack RAG app. Upload PDFs, ask in plain language, and read a streamed answer with its source file and page. It runs entirely on your machine with Ollama and PostgreSQL. Hosted providers are optional.
+DocQuery is a full-stack RAG app. Upload PDFs, ask in plain language, and read a streamed answer with its source file and page. It runs entirely on your machine with Ollama and PostgreSQL. Hosted providers are optional.
 
 | | |
 |---|---|
@@ -15,21 +15,35 @@ PrivateDoc is a full-stack RAG app. Upload PDFs, ask in plain language, and read
 
 ## Demo
 
+**Landing page**
+
+![Landing page](docs/demo/dashboard.png)
+
+The landing page explains the product and lets visitors start a guest chat or sign in.
+
 **Upload with live status**
 
-*GIF placeholder: `docs/demo/upload.gif`*
+![Upload with live status](docs/demo/upload.png)
+
+While a PDF is processed, the status line shows the current stage and a live timer.
 
 **Answer with source pages**
 
-*GIF placeholder: `docs/demo/answer.gif`*
+![Answer with source pages](docs/demo/answer.png)
 
-**Chat history**
+Each answer lists the file and page of every passage it was built from.
 
-*Screenshot placeholder: `docs/demo/history.png`*
+**Chat history and undo**
+
+![Chat history and undo](docs/demo/history.png)
+
+Chats are listed in the sidebar. Deleting one shows an Undo option for six seconds before the delete is final.
 
 **Login**
 
-*Screenshot placeholder: `docs/demo/login.png`*
+![Login](docs/demo/login.png)
+
+Sign in with email and password, with Google, or continue as a guest.
 
 ## Architecture
 
@@ -291,7 +305,7 @@ The `Dockerfile` installs Tesseract and the Python dependencies, and it reads th
 ## Project Structure
 
 ```
-PrivateDoc/
+privatedoc/
 ├── app/
 │   ├── api/
 │   │   ├── auth.py                # Signup, login, Google sign-in, guest access
