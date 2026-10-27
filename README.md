@@ -210,8 +210,8 @@ On first run, the embedding and reranker models download from Hugging Face. No d
 Requirements: Python 3.11+, PostgreSQL with pgvector, Ollama (`ollama pull llama3.2` and `ollama pull llava`), and Tesseract for OCR.
 
 ```bash
-git clone https://github.com/Shivam7977/privatedoc.git
-cd privatedoc
+git clone https://github.com/Shivam7977/DocQuery.git
+cd DocQuery
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 cp .env.example .env        # set DATABASE_URL and JWT_SECRET
