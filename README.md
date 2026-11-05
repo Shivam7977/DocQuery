@@ -351,3 +351,10 @@ privatedoc/
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+
+## Developer
+
+Built by **Shivam Pandey**.
+
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?logo=linkedin)](https://www.linkedin.com/in/shivam-rajesh-pandey/) [![Portfolio](https://img.shields.io/badge/Portfolio-Visit-green?logo=vercel)](https://shivam-pandey-ai.netlify.app/) [![GitHub](https://img.shields.io/badge/GitHub-Follow-black?logo=github)](https://github.com/Shivam7977)
